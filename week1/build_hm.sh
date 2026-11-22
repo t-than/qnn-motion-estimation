@@ -31,10 +31,14 @@ else
     git checkout --quiet master
 fi
 
+# Every step ends in "|| return 1": build() is called as "if ! build", and bash
+# ignores `set -e` inside a function called from an if-condition. Without these,
+# a failed make was followed by a successful "cd ..", so build() returned 0 and the
+# -Werror retry below never ran.
 build() {
-    rm -rf build && mkdir build && cd build
-    cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SEARCH_OPENSSL=off
-    make -j"${JOBS}"
+    rm -rf build && mkdir build && cd build || return 1
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SEARCH_OPENSSL=off || return 1
+    make -j"${JOBS}" || return 1
     cd ..
 }
 
@@ -43,6 +47,8 @@ if ! build; then
     # HM compiles GCC builds with -Werror. Newer GCC releases (Arch ships the
     # latest) sometimes add warnings that HM's code triggers, which breaks the
     # build without anything being actually wrong. Retry with warnings allowed.
+    # (GCC 16 on HM-18.0: -Warray-bounds false positive in TComLoopFilter.cpp and
+    #  -Wunused-but-set-variable in SEIFilmGrainSynthesizer.cpp.)
     echo
     echo "==> Build failed; retrying with -Werror disabled (common with very new GCC)"
     cd "${HM_DIR}"
