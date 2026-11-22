@@ -1,0 +1,17 @@
+# Large or regenerable content - kept out of git
+.venv/
+__pycache__/
+*.pyc
+week1/HM/            # HM is its own git repo; its commit is recorded in hm_build_info.txt
+week1/data/          # raw and prepared video, datasets
+week1/results/**/*.bin
+week1/results/**/*.yuv
+week1/results/**/enc.log
+week1/results/**/dec.log
+*.yuv
+*.y4m
+*.7z
+*.zip
+*.pth
+*.pt
+checkpoints/
