@@ -8,7 +8,7 @@ bits). Two interpolation methods are provided:
   cubic  the original 3rd-order polynomial fit of VCEG-M33 (Bjontegaard 2001)
 
 Also reports the encoding-time ratio (geometric mean of per-sequence
-test/anchor time, as in JVET "EncT").
+test/anchor encoder CPU time, as in JVET "EncT").
 
 Examples
 --------
@@ -65,6 +65,14 @@ def bd_psnr(r_a, d_a, r_t, d_t, method="pchip") -> float:
     return (integ(lt, d_t, lo, hi) - integ(la, d_a, lo, hi)) / (hi - lo)
 
 
+def enc_time(row: dict) -> float:
+    """Encoder CPU time: HM's "Total Time", measured with clock(), i.e. CPU time of the
+    encoder process. Wall-clock time (enc_wall_s) depends on what else runs on the
+    machine, so it is only a fallback for rows that lack hm_time_s."""
+    v = row.get("hm_time_s")
+    return float(v) if v not in (None, "", "None") else float(row["enc_wall_s"])
+
+
 def load(path: str) -> dict:
     data = defaultdict(list)
     with open(path, newline="") as f:
@@ -99,8 +107,8 @@ def compare(anchor_csv: str, test_csv: str, metric: str, method: str) -> int:
         da = [float(a[q][col]) for q in qps]
         dt = [float(t[q][col]) for q in qps]
         bdr, bdp = bd_rate(ra, da, rt, dt, method), bd_psnr(ra, da, rt, dt, method)
-        ta = sum(float(a[q]["enc_wall_s"]) for q in qps)
-        tt = sum(float(t[q]["enc_wall_s"]) for q in qps)
+        ta = sum(enc_time(a[q]) for q in qps)
+        tt = sum(enc_time(t[q]) for q in qps)
         per_group[key[0]].append((bdr, bdp, tt / ta))
         print(f"{key[0]:7s} {key[1]:16s} {key[2] + 'x' + key[3]:>10s} {bdr:10.2f} {bdp:11.3f} {100 * tt / ta:8.1f}")
 
@@ -116,7 +124,7 @@ def compare(anchor_csv: str, test_csv: str, metric: str, method: str) -> int:
               f"{np.nanmean([v[1] for v in allv]):11.3f} "
               f"{100 * math.exp(np.mean([math.log(v[2]) for v in allv])):8.1f}")
     print("\nBD-rate < 0: test needs fewer bits for the same PSNR (better).")
-    print("EncT: test encoding time as % of anchor (geometric mean over sequences).")
+    print("EncT: test encoder CPU time as % of anchor (geometric mean over sequences).")
     return 0
 
 
