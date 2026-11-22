@@ -93,17 +93,51 @@ index 368732875dd5e25dbb9fb5fbf03c834d7c0c211b..0c75806854a21c944bf28784c1387713
      Double PSNR_Y;
 diff --git a/source/Lib/TLibEncoder/TEncMvIO.cpp b/source/Lib/TLibEncoder/TEncMvIO.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611fc14a4792
+index 0000000000000000000000000000000000000000..d956aeea6cdb1222a678855386f91e40b12bfb28
 --- /dev/null
 +++ b/source/Lib/TLibEncoder/TEncMvIO.cpp
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,548 @@
++/* The copyright in this software is being made available under the BSD
++ * License, included below. This software may be subject to other third party
++ * and contributor rights, including patent rights, and no such rights are
++ * granted under this license.
++ *
++ * Copyright (c) 2026, Thanos Tsakiris
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *  * Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *  * Neither the name of the copyright holder nor the names of its contributors may
++ *    be used to endorse or promote products derived from this software without
++ *    specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
 +/* qnn-motion-estimation project, week 2 (not part of the HM reference software).
 + * See TEncMvIO.h.
 + *
 + * File formats (little-endian):
 + *
-+ * --MEDumpFile (".dump"): 16-byte header "QMED", uint32 version = 1, uint32 record size = 32,
-+ *   uint32 reserved = 0; then one 32-byte record per call to xMotionEstimation():
++ * --MEDumpFile / --MEReplayFile (".dump"): 16-byte header "QMED", uint32 version = 1,
++ *   uint32 record size = 32, uint32 reserved = 0; then one 32-byte record per call to
++ *   xMotionEstimation():
 + *     int32 POC, int32 reference POC,
 + *     int16 flags (bit 0: list L1, bit 1: bi-prediction refinement), int16 reference index,
 + *     int16 x, y, width, height       block position and size in luma samples,
@@ -111,10 +145,10 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 + *     int16 int_x, int_y              result of the integer search, integer pel,
 + *     int16 mv_x, mv_y                final vector after half/quarter-pel refinement, quarter-pel.
 + *
-+ * --MVFieldDumpFile (".mvf"): 24-byte header "QMVF", uint32 version = 1, width, height,
-+ *   grid = 4, number of entries; then per entry: int32 POC, int32 reference POC, and
-+ *   (height/4) x (width/4) cells in raster order, each int16 mv_x, int16 mv_y (quarter-pel),
-+ *   int16 confidence (0 = no vector for this reference, 1000 = coded with it).
++ * --MVFieldDumpFile / --MVFieldFile (".mvf"): 24-byte header "QMVF", uint32 version = 1,
++ *   width, height, grid = 4, number of entries; then per entry: int32 POC, int32 reference POC,
++ *   and ceil(height/4) x ceil(width/4) cells in raster order, each int16 mv_x, int16 mv_y
++ *   (quarter-pel), int16 confidence (0 = no vector, 1..1000; the dump writes 1000).
 + */
 +
 +#include "TEncMvIO.h"
@@ -122,7 +156,7 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +#include <algorithm>
 +#include <cstdlib>
 +#include <cstring>
-+#include <vector>
++#include <sstream>
 +
 +#include "TLibCommon/TComPic.h"
 +#include "TLibCommon/TComDataCU.h"
@@ -131,12 +165,14 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +namespace
 +{
 +const Int  ME_RECORD_BYTES    = 32;
++const Int  ME_HEADER_BYTES    = 16;
 +const Int  FIELD_GRID         = 4;
 +const Int  FIELD_HEADER_BYTES = 24;
 +const Int  FIELD_CONF_CODED   = 1000;
 +
 +[[noreturn]] Void fail(const std::string& msg)
 +{
++  fflush(stdout);
 +  fprintf(stderr, "\nHM-mv error: %s\n", msg.c_str());
 +  exit(EXIT_FAILURE);
 +}
@@ -153,13 +189,16 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +  p[0] = UChar(u & 0xff);
 +  p[1] = UChar(u >> 8);
 +}
++UInt getU32(const UChar* p)    { return UInt(p[0]) | (UInt(p[1]) << 8) | (UInt(p[2]) << 16) | (UInt(p[3]) << 24); }
++Int  getI32(const UChar* p)    { return Int(getU32(p)); }
++Int  getI16(const UChar* p)    { return Int(Short(UShort(UInt(p[0]) | (UInt(p[1]) << 8)))); }
 +
-+FILE* openForWriting(const std::string& path, const char* option)
++FILE* openFile(const std::string& path, const char* mode, const char* option)
 +{
-+  FILE* f = fopen(path.c_str(), "wb");
++  FILE* f = fopen(path.c_str(), mode);
 +  if (f == NULL)
 +  {
-+    fail(std::string("cannot open ") + option + " file '" + path + "' for writing");
++    fail(std::string("cannot open ") + option + " file '" + path + "'");
 +  }
 +  setvbuf(f, NULL, _IOFBF, 1 << 20);
 +  return f;
@@ -172,6 +211,15 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +    fail("write error in a motion-vector file (disk full?)");
 +  }
 +}
++
++std::string describeCall(Int poc, Int refPoc, Int flags, Int refIdx, Int x, Int y, Int w, Int h, Int px, Int py)
++{
++  std::ostringstream s;
++  s << "POC " << poc << " -> " << refPoc << " (list " << (flags & 1) << (flags & 2 ? ", bi" : "")
++    << ", ref " << refIdx << "), block " << w << "x" << h << " at (" << x << "," << y
++    << "), predictor (" << px << "," << py << ")";
++  return s.str();
++}
 +} // namespace
 +
 +TEncMvIO& TEncMvIO::get()
@@ -181,13 +229,22 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +}
 +
 +TEncMvIO::TEncMvIO()
-+: m_meDump(NULL)
++: m_mode(MODE_NONE)
++, m_meDump(NULL)
++, m_meRecords(0)
++, m_replay(NULL)
++, m_replayRecords(0)
 +, m_fieldDump(NULL)
 +, m_fieldHeaderDone(false)
 +, m_fieldWidth(0)
 +, m_fieldHeight(0)
 +, m_fieldEntries(0)
-+, m_meRecords(0)
++, m_inWidth(0)
++, m_inHeight(0)
++, m_inSizeChecked(false)
++, m_fieldHits(0)
++, m_fieldMisses(0)
++, m_seedSet(false)
 +{
 +}
 +
@@ -204,31 +261,106 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +  {
 +    fail("--MVRefs must be 'first' or 'all', not '" + m_cfg.mvRefs + "'");
 +  }
-+  if (!m_cfg.mvMode.empty() && m_cfg.mvMode != "replace" && m_cfg.mvMode != "seed")
++  if (m_cfg.mvMode == "replace")
++  {
++    m_mode = MODE_REPLACE;
++  }
++  else if (m_cfg.mvMode == "seed")
++  {
++    m_mode = MODE_SEED;
++  }
++  else if (!m_cfg.mvMode.empty())
 +  {
 +    fail("--MVMode must be 'replace' or 'seed', not '" + m_cfg.mvMode + "'");
 +  }
-+  // Day 3 of week 2 implements these. Until then, refuse them rather than ignore them.
-+  if (!m_cfg.meReplayFile.empty() || !m_cfg.mvFieldFile.empty() || !m_cfg.mvMode.empty() || m_cfg.mvSeedCentre)
++  if (m_cfg.mvFieldFile.empty() != (m_mode == MODE_NONE))
 +  {
-+    fail("--MEReplayFile, --MVFieldFile, --MVMode and --MVSeedCentre are not implemented yet (week 2, day 3)");
++    fail("--MVFieldFile and --MVMode go together: give both or neither");
++  }
++  if (m_cfg.mvSeedCentre && m_mode != MODE_SEED)
++  {
++    fail("--MVSeedCentre needs --MVMode=seed");
++  }
++  if (!m_cfg.meReplayFile.empty() && !m_cfg.mvFieldFile.empty())
++  {
++    fail("--MEReplayFile and --MVFieldFile can't be combined");
 +  }
 +
 +  if (!m_cfg.meDumpFile.empty())
 +  {
-+    m_meDump = openForWriting(m_cfg.meDumpFile, "--MEDumpFile");
-+    UChar header[16];
++    m_meDump = openFile(m_cfg.meDumpFile, "wb", "--MEDumpFile");
++    UChar header[ME_HEADER_BYTES];
 +    memcpy(header, "QMED", 4);
 +    putU32(header + 4, 1);
 +    putU32(header + 8, ME_RECORD_BYTES);
 +    putU32(header + 12, 0);
 +    writeOrFail(m_meDump, header, sizeof(header));
 +  }
++  if (!m_cfg.meReplayFile.empty())
++  {
++    m_replay = openFile(m_cfg.meReplayFile, "rb", "--MEReplayFile");
++    UChar header[ME_HEADER_BYTES];
++    if (fread(header, 1, sizeof(header), m_replay) != sizeof(header) || memcmp(header, "QMED", 4) != 0
++        || getU32(header + 4) != 1 || getU32(header + 8) != UInt(ME_RECORD_BYTES))
++    {
++      fail("--MEReplayFile '" + m_cfg.meReplayFile + "' is not a version-1 .dump file");
++    }
++  }
 +  if (!m_cfg.mvFieldDumpFile.empty())
 +  {
-+    m_fieldDump = openForWriting(m_cfg.mvFieldDumpFile, "--MVFieldDumpFile");
++    m_fieldDump = openFile(m_cfg.mvFieldDumpFile, "wb", "--MVFieldDumpFile");
 +    // The header is written with the first picture, when the picture size is known.
 +  }
++  if (!m_cfg.mvFieldFile.empty())
++  {
++    loadField(m_cfg.mvFieldFile);
++  }
++}
++
++Void TEncMvIO::loadField(const std::string& path)
++{
++  FILE* f = openFile(path, "rb", "--MVFieldFile");
++  std::vector<UChar> data;
++  UChar buf[1 << 16];
++  size_t n;
++  while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
++  {
++    data.insert(data.end(), buf, buf + n);
++  }
++  fclose(f);
++
++  if (data.size() < size_t(FIELD_HEADER_BYTES) || memcmp(&data[0], "QMVF", 4) != 0
++      || getU32(&data[4]) != 1 || getU32(&data[16]) != UInt(FIELD_GRID))
++  {
++    fail("--MVFieldFile '" + path + "' is not a version-1 .mvf file with a 4x4 grid");
++  }
++  m_inWidth  = Int(getU32(&data[8]));
++  m_inHeight = Int(getU32(&data[12]));
++  const UInt   count  = getU32(&data[20]);
++  const size_t cells  = size_t((m_inWidth + FIELD_GRID - 1) / FIELD_GRID) * ((m_inHeight + FIELD_GRID - 1) / FIELD_GRID);
++  const size_t stride = 8 + cells * 6;
++  if (data.size() != FIELD_HEADER_BYTES + count * stride)
++  {
++    fail("--MVFieldFile '" + path + "': file size does not match its header (truncated?)");
++  }
++  for (UInt i = 0; i < count; i++)
++  {
++    const UChar* e = &data[FIELD_HEADER_BYTES + i * stride];
++    const std::pair<Int, Int> key(getI32(e), getI32(e + 4));
++    if (m_field.count(key))
++    {
++      fail("--MVFieldFile '" + path + "': duplicate entry for one (POC, reference POC) pair");
++    }
++    std::vector<Short>& v = m_field[key];
++    v.resize(cells * 3);
++    for (size_t c = 0; c < cells * 3; c++)
++    {
++      v[c] = Short(getI16(e + 8 + 2 * c));
++    }
++  }
++  printf("HM-mv: %u motion-field entries (%dx%d) read from %s, mode %s%s, references: %s\n", count,
++         m_inWidth, m_inHeight, path.c_str(), m_cfg.mvMode.c_str(), m_cfg.mvSeedCentre ? " (window centred)" : "",
++         m_cfg.mvRefs.c_str());
 +}
 +
 +Void TEncMvIO::close()
@@ -241,6 +373,18 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +    }
 +    m_meDump = NULL;
 +    printf("\nHM-mv: %llu motion-search records written to %s\n", (unsigned long long)m_meRecords, m_cfg.meDumpFile.c_str());
++  }
++  if (m_replay != NULL)
++  {
++    UChar rec[ME_RECORD_BYTES];
++    const Bool leftOver = fread(rec, 1, sizeof(rec), m_replay) != 0;
++    fclose(m_replay);
++    m_replay = NULL;
++    if (leftOver)
++    {
++      fail("--MEReplayFile has more records than this encode used (was it made with more frames?)");
++    }
++    printf("\nHM-mv: %llu motion searches replayed from %s\n", (unsigned long long)m_replayRecords, m_cfg.meReplayFile.c_str());
 +  }
 +  if (m_fieldDump != NULL)
 +  {
@@ -262,6 +406,13 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +    }
 +    m_fieldDump = NULL;
 +    printf("HM-mv: %u motion-field entries written to %s\n", m_fieldEntries, m_cfg.mvFieldDumpFile.c_str());
++  }
++  if (m_mode != MODE_NONE)
++  {
++    const UInt64 total = m_fieldHits + m_fieldMisses;
++    printf("HM-mv: --MVFieldFile used for %llu of %llu eligible motion searches (%.1f %%); the rest searched as usual\n",
++           (unsigned long long)m_fieldHits, (unsigned long long)total, total ? 100.0 * Double(m_fieldHits) / Double(total) : 0.0);
++    m_mode = MODE_NONE;
 +  }
 +}
 +
@@ -289,6 +440,118 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +  putI16(rec + 30, finalMv.getVer());
 +  writeOrFail(m_meDump, rec, sizeof(rec));
 +  m_meRecords++;
++}
++
++TComMv TEncMvIO::replayIntegerMv(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, Bool bi,
++                                 const TComMv& pred)
++{
++  Int x, y, w, h;
++  cu->getPartPosition(partIdx, x, y, w, h);
++  const TComSlice* slice = cu->getSlice();
++  const Int poc    = slice->getPOC();
++  const Int refPoc = slice->getRefPOC(refList, refIdx);
++  const Int flags  = (refList == REF_PIC_LIST_1 ? 1 : 0) | (bi ? 2 : 0);
++
++  UChar rec[ME_RECORD_BYTES];
++  if (fread(rec, 1, sizeof(rec), m_replay) != sizeof(rec))
++  {
++    fail("--MEReplayFile ended early, at the motion search for " +
++         describeCall(poc, refPoc, flags, refIdx, x, y, w, h, pred.getHor(), pred.getVer()) +
++         " (was it made with fewer frames?)");
++  }
++  const Bool same = getI32(rec) == poc && getI32(rec + 4) == refPoc && getI16(rec + 8) == flags
++                    && getI16(rec + 10) == refIdx && getI16(rec + 12) == x && getI16(rec + 14) == y
++                    && getI16(rec + 16) == w && getI16(rec + 18) == h
++                    && getI16(rec + 20) == pred.getHor() && getI16(rec + 22) == pred.getVer();
++  if (!same)
++  {
++    std::ostringstream s;
++    s << "--MEReplayFile is out of step with this encode at record " << m_replayRecords << ":\n  encoder:  "
++      << describeCall(poc, refPoc, flags, refIdx, x, y, w, h, pred.getHor(), pred.getVer()) << "\n  recorded: "
++      << describeCall(getI32(rec), getI32(rec + 4), getI16(rec + 8), getI16(rec + 10), getI16(rec + 12),
++                      getI16(rec + 14), getI16(rec + 16), getI16(rec + 18), getI16(rec + 20), getI16(rec + 22))
++      << "\n(the dump must come from the same encoder binary, configuration, sequence, QP and frame count)";
++    fail(s.str());
++  }
++  m_replayRecords++;
++  return TComMv(getI16(rec + 24), getI16(rec + 26));
++}
++
++TComMv TEncMvIO::toIntegerPel(const TComMv& qpel)
++{
++  TComMv mv = qpel;
++#if ME_ENABLE_ROUNDING_OF_MVS
++  mv.divideByPowerOf2(2);
++#else
++  mv >>= 2;
++#endif
++  return mv;
++}
++
++Bool TEncMvIO::fieldMv(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, TComMv& mv)
++{
++  if (m_mode == MODE_NONE)
++  {
++    return false;
++  }
++  if (refList != REF_PIC_LIST_0 || (m_cfg.mvRefs == "first" && refIdx != 0))
++  {
++    return false;   // not eligible: other reference pictures are searched as usual (decision D1)
++  }
++  const TComSlice* slice = cu->getSlice();
++  if (!m_inSizeChecked)
++  {
++    const TComSPS& sps = *slice->getSPS();
++    if (Int(sps.getPicWidthInLumaSamples()) != m_inWidth || Int(sps.getPicHeightInLumaSamples()) != m_inHeight)
++    {
++      std::ostringstream s;
++      s << "--MVFieldFile is for " << m_inWidth << "x" << m_inHeight << ", but the picture is "
++        << sps.getPicWidthInLumaSamples() << "x" << sps.getPicHeightInLumaSamples();
++      fail(s.str());
++    }
++    m_inSizeChecked = true;
++  }
++
++  std::map<std::pair<Int, Int>, std::vector<Short> >::const_iterator it =
++    m_field.find(std::make_pair(slice->getPOC(), slice->getRefPOC(refList, refIdx)));
++  if (it == m_field.end())
++  {
++    m_fieldMisses++;
++    return false;
++  }
++  const std::vector<Short>& cells = it->second;
++  const Int gridW = (m_inWidth  + FIELD_GRID - 1) / FIELD_GRID;
++  const Int gridH = (m_inHeight + FIELD_GRID - 1) / FIELD_GRID;
++
++  Int x, y, w, h;
++  cu->getPartPosition(partIdx, x, y, w, h);
++  m_medianX.clear();
++  m_medianY.clear();
++  for (Int cy = y / FIELD_GRID; cy <= std::min(gridH - 1, (y + h - 1) / FIELD_GRID); cy++)
++  {
++    for (Int cx = x / FIELD_GRID; cx <= std::min(gridW - 1, (x + w - 1) / FIELD_GRID); cx++)
++    {
++      const Short* c = &cells[(size_t(cy) * gridW + cx) * 3];
++      if (c[2] > 0)
++      {
++        m_medianX.push_back(c[0]);
++        m_medianY.push_back(c[1]);
++      }
++    }
++  }
++  if (m_medianX.empty())
++  {
++    m_fieldMisses++;
++    return false;
++  }
++  // Component-wise median (decision D3); the lower middle element for an even count.
++  const size_t mid = (m_medianX.size() - 1) / 2;
++  std::nth_element(m_medianX.begin(), m_medianX.begin() + mid, m_medianX.end());
++  std::nth_element(m_medianY.begin(), m_medianY.begin() + mid, m_medianY.end());
++  mv = TComMv(m_medianX[mid], m_medianY[mid]);
++  cu->clipMv(mv);
++  m_fieldHits++;
++  return true;
 +}
 +
 +Void TEncMvIO::writeFieldHeader(Int width, Int height)
@@ -384,27 +647,63 @@ index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611f
 +}
 diff --git a/source/Lib/TLibEncoder/TEncMvIO.h b/source/Lib/TLibEncoder/TEncMvIO.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..715c35d084659749b4230165ca883a6d59b8e300
+index 0000000000000000000000000000000000000000..880d95a67f2b3d637db5f2204cdcb11667cfe047
 --- /dev/null
 +++ b/source/Lib/TLibEncoder/TEncMvIO.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,160 @@
++/* The copyright in this software is being made available under the BSD
++ * License, included below. This software may be subject to other third party
++ * and contributor rights, including patent rights, and no such rights are
++ * granted under this license.
++ *
++ * Copyright (c) 2026, Thanos Tsakiris
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ *  * Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *  * Neither the name of the copyright holder nor the names of its contributors may
++ *    be used to endorse or promote products derived from this software without
++ *    specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
 +/* qnn-motion-estimation project, week 2 (not part of the HM reference software).
 + *
-+ * Motion-vector I/O for HM-mv: record the encoder's motion vectors, and (from day 3)
-+ * take motion vectors from outside. See week2/README.md of the project for the file
-+ * formats and the tests built on them. With none of the options set, nothing here
-+ * runs and the encoder behaves exactly like HM-18.0.
++ * Motion-vector I/O for HM-mv: record the encoder's motion vectors, and take motion vectors
++ * from outside. See week2/README.md of the project for the file formats and the tests built
++ * on them. With none of the options set, nothing here changes what the encoder does, and
++ * HM-mv produces the same bitstreams as HM-18.0.
 + */
 +
 +/** \file     TEncMvIO.h
-+    \brief    motion-vector dump / injection (project extension, week 2)
++    \brief    motion-vector dump / replay / injection (project extension, week 2)
 +*/
 +
 +#ifndef __TENCMVIO__
 +#define __TENCMVIO__
 +
 +#include <cstdio>
++#include <map>
 +#include <string>
++#include <utility>
++#include <vector>
 +#include "TLibCommon/CommonDef.h"
 +#include "TLibCommon/TComMv.h"
 +
@@ -415,11 +714,11 @@ index 0000000000000000000000000000000000000000..715c35d084659749b4230165ca883a6d
 +struct MvIoConfig
 +{
 +  std::string meDumpFile;       ///< --MEDumpFile: one record per integer motion search
-+  std::string meReplayFile;     ///< --MEReplayFile: replay recorded integer searches (day 3)
++  std::string meReplayFile;     ///< --MEReplayFile: take each integer search result from a --MEDumpFile file
 +  std::string mvFieldDumpFile;  ///< --MVFieldDumpFile: final coded vectors per picture, 4x4 grid
-+  std::string mvFieldFile;      ///< --MVFieldFile: external motion field (day 3)
-+  std::string mvMode;           ///< --MVMode: "replace" or "seed" (day 3)
-+  Bool        mvSeedCentre;     ///< --MVSeedCentre: centre the search window on the external vector (day 3)
++  std::string mvFieldFile;      ///< --MVFieldFile: external motion field (.mvf)
++  std::string mvMode;           ///< --MVMode: "replace" or "seed"
++  Bool        mvSeedCentre;     ///< --MVSeedCentre: seed mode, centre the search window on the external vector
 +  std::string mvRefs;           ///< --MVRefs: "first" (reference index 0 only) or "all"
 +
 +  MvIoConfig() : mvSeedCentre(false), mvRefs("first") {}
@@ -433,39 +732,87 @@ index 0000000000000000000000000000000000000000..715c35d084659749b4230165ca883a6d
 +
 +  //! Check the settings and open the files; called once from TEncTop::init()
 +  Void open(const MvIoConfig& cfg);
-+  //! Finish and close the files; called from TEncTop::destroy()
++  //! Finish and close the files, print statistics; called from TEncTop::destroy()
 +  Void close();
 +
-+  Bool meDumpEnabled() const { return m_meDump != NULL; }
++  Bool meDumpEnabled() const   { return m_meDump != NULL; }
++  Bool replayEnabled() const   { return m_replay != NULL; }
++  Bool replaceMode() const     { return m_mode == MODE_REPLACE; }
++  Bool seedMode() const        { return m_mode == MODE_SEED; }
++  Bool seedCentre() const      { return m_cfg.mvSeedCentre; }
 +
 +  //! --MEDumpFile: one record for a call to TEncSearch::xMotionEstimation()
 +  Void writeMeRecord(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, Bool bi,
 +                     const TComMv& pred, const TComMv& integerMv, const TComMv& finalMv);
 +
++  //! --MEReplayFile: the recorded integer search result (integer pel) for this call. The record
++  //! must describe the same call (POC, reference, block, predictor); otherwise the run stops.
++  TComMv replayIntegerMv(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, Bool bi,
++                         const TComMv& pred);
++
++  //! --MVFieldFile: the external vector for this block (quarter-pel, clipped to the picture), as
++  //! the component-wise median of the valid 4x4 cells the block covers. False if the field has
++  //! no vector for this block or reference picture; HM then searches as usual.
++  Bool fieldMv(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, TComMv& mv);
++
++  //! Seed mode: the vector xTZSearch() should add as a start point (quarter-pel), or NULL
++  const TComMv* seed() const   { return m_seedSet ? &m_seed : NULL; }
++  Void setSeed(const TComMv& mv) { m_seed = mv; m_seedSet = true; }
++  Void clearSeed()             { m_seedSet = false; }
++
++  //! Quarter-pel to integer pel, rounded the way HM's own search does it
++  static TComMv toIntegerPel(const TComMv& qpel);
++
 +  //! --MVFieldDumpFile: final coded vectors of a picture, after it has been coded
 +  Void dumpPictureField(TComPic* pic);
 +
 +private:
++  enum Mode { MODE_NONE, MODE_REPLACE, MODE_SEED };
++
 +  TEncMvIO();
 +  ~TEncMvIO();
 +  TEncMvIO(const TEncMvIO&);
 +  TEncMvIO& operator=(const TEncMvIO&);
 +
 +  Void writeFieldHeader(Int width, Int height);
++  Void loadField(const std::string& path);
 +
 +  MvIoConfig m_cfg;
-+  FILE*      m_meDump;            ///< --MEDumpFile, or NULL
-+  FILE*      m_fieldDump;         ///< --MVFieldDumpFile, or NULL
++  Mode       m_mode;
++
++  // --MEDumpFile
++  FILE*      m_meDump;
++  UInt64     m_meRecords;
++
++  // --MEReplayFile
++  FILE*      m_replay;
++  UInt64     m_replayRecords;
++
++  // --MVFieldDumpFile
++  FILE*      m_fieldDump;
 +  Bool       m_fieldHeaderDone;
 +  Int        m_fieldWidth;
 +  Int        m_fieldHeight;
 +  UInt       m_fieldEntries;
-+  UInt64     m_meRecords;
++
++  // --MVFieldFile: (POC, reference POC) -> cells (mv_x, mv_y, confidence per 4x4 cell, raster order)
++  std::map<std::pair<Int, Int>, std::vector<Short> > m_field;
++  Int        m_inWidth;
++  Int        m_inHeight;
++  Bool       m_inSizeChecked;
++  UInt64     m_fieldHits;       ///< calls that got an external vector
++  UInt64     m_fieldMisses;     ///< eligible calls without one (no valid cell, or no entry)
++  std::vector<Short> m_medianX;
++  std::vector<Short> m_medianY;
++
++  // seed mode: the vector for the current call
++  TComMv     m_seed;
++  Bool       m_seedSet;
 +};
 +
 +#endif // __TENCMVIO__
 diff --git a/source/Lib/TLibEncoder/TEncSearch.cpp b/source/Lib/TLibEncoder/TEncSearch.cpp
-index 25b1bccf54ca5bae8dbb282a39a402c4cb673a0a..440973c2f56c142445a32d96115b5ec7175d9cce 100644
+index 25b1bccf54ca5bae8dbb282a39a402c4cb673a0a..d696e4d7d5fbf3c6bf33caea60d7607466cd3b02 100644
 --- a/source/Lib/TLibEncoder/TEncSearch.cpp
 +++ b/source/Lib/TLibEncoder/TEncSearch.cpp
 @@ -41,6 +41,7 @@
@@ -476,7 +823,69 @@ index 25b1bccf54ca5bae8dbb282a39a402c4cb673a0a..440973c2f56c142445a32d96115b5ec7
  #include <math.h>
  #include <limits>
  
-@@ -3851,6 +3852,7 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+@@ -3804,6 +3805,11 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+ 
+   TComMv      cMvPred = *pcMvPred;
+ 
++  // project extension (week 2): external vector for this block (--MVFieldFile), quarter-pel
++  TEncMvIO& rMvIO = TEncMvIO::get();
++  TComMv      cFieldMv;
++  const Bool  bHasFieldMv = !bBi && rMvIO.fieldMv( pcCU, iPartIdx, eRefPicList, iRefIdxPred, cFieldMv );
++
+   if ( bBi )
+   {
+ #if MCTS_ENC_CHECK
+@@ -3814,10 +3820,13 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+   }
+   else
+   {
++    // project extension (week 2): with --MVMode=seed --MVSeedCentre=1 the window is centred on
++    // the external vector instead of the predictor
++    const TComMv& cMvCentre = ( bHasFieldMv && rMvIO.seedMode() && rMvIO.seedCentre() ) ? cFieldMv : cMvPred;
+ #if MCTS_ENC_CHECK
+-    xSetSearchRange(pcCU, cMvPred, iSrchRng, cMvSrchRngLT, cMvSrchRngRB, &cPattern);
++    xSetSearchRange(pcCU, cMvCentre, iSrchRng, cMvSrchRngLT, cMvSrchRngRB, &cPattern);
+ #else
+-    xSetSearchRange(pcCU, cMvPred, iSrchRng, cMvSrchRngLT, cMvSrchRngRB);
++    xSetSearchRange(pcCU, cMvCentre, iSrchRng, cMvSrchRngLT, cMvSrchRngRB);
+ #endif
+   }
+ 
+@@ -3828,7 +3837,19 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+ 
+   setWpScalingDistParam( pcCU, iRefIdxPred, eRefPicList );
+   //  Do integer search
+-  if ( (m_motionEstimationSearchMethod==MESEARCH_FULL) || bBi )
++  // project extension (week 2), hook A: with --MEReplayFile, or --MVFieldFile and --MVMode=replace,
++  // the integer search result comes from outside and HM's integer search is skipped. The half-
++  // and quarter-pel refinement below runs as usual (decision D2).
++  if ( rMvIO.replayEnabled() || ( bHasFieldMv && rMvIO.replaceMode() ) )
++  {
++    rcMv = rMvIO.replayEnabled() ? rMvIO.replayIntegerMv( pcCU, iPartIdx, eRefPicList, iRefIdxPred, bBi, *pcMvPred )
++                                 : TEncMvIO::toIntegerPel( cFieldMv );
++    if ( !( (m_motionEstimationSearchMethod==MESEARCH_FULL) || bBi ) && pcCU->getPartitionSize(0) == SIZE_2Nx2N )
++    {
++      m_integerMv2Nx2N[eRefPicList][iRefIdxPred] = rcMv;   // as after HM's own fast search
++    }
++  }
++  else if ( (m_motionEstimationSearchMethod==MESEARCH_FULL) || bBi )
+   {
+     xPatternSearch      ( &cPattern, piRefY, iRefStride, &cMvSrchRngLT, &cMvSrchRngRB, rcMv, ruiCost );
+   }
+@@ -3840,7 +3861,12 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+     {
+       pIntegerMv2Nx2NPred = &(m_integerMv2Nx2N[eRefPicList][iRefIdxPred]);
+     }
++    if ( bHasFieldMv && rMvIO.seedMode() )
++    {
++      rMvIO.setSeed( cFieldMv );   // project extension (week 2), hook B: read by xTZSearch()
++    }
+     xPatternSearchFast  ( pcCU, &cPattern, piRefY, iRefStride, &cMvSrchRngLT, &cMvSrchRngRB, rcMv, ruiCost, pIntegerMv2Nx2NPred );
++    rMvIO.clearSeed();
+     if (pcCU->getPartitionSize(0) == SIZE_2Nx2N)
+     {
+       m_integerMv2Nx2N[eRefPicList][iRefIdxPred] = rcMv;
+@@ -3851,6 +3877,7 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
    m_pcRdCost->setCostScale ( 1 );
  
    const Bool bIsLosslessCoded = pcCU->getCUTransquantBypass(uiPartAddr) != 0;
@@ -484,19 +893,35 @@ index 25b1bccf54ca5bae8dbb282a39a402c4cb673a0a..440973c2f56c142445a32d96115b5ec7
    xPatternSearchFracDIF( bIsLosslessCoded, &cPattern, piRefY, iRefStride, &rcMv, cMvHalf, cMvQter, ruiCost );
  
    m_pcRdCost->setCostScale( 0 );
-@@ -3862,6 +3864,12 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+@@ -3862,6 +3889,12 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
  
    ruiBits      += uiMvBits;
    ruiCost       = (Distortion)( floor( fWeight * ( (Double)ruiCost - (Double)m_pcRdCost->getCost( uiMvBits ) ) ) + (Double)m_pcRdCost->getCost( ruiBits ) );
 +
 +  // project extension (week 2): --MEDumpFile
-+  if (TEncMvIO::get().meDumpEnabled())
++  if (rMvIO.meDumpEnabled())
 +  {
-+    TEncMvIO::get().writeMeRecord(pcCU, iPartIdx, eRefPicList, iRefIdxPred, bBi, *pcMvPred, cIntegerMv, rcMv);
++    rMvIO.writeMeRecord(pcCU, iPartIdx, eRefPicList, iRefIdxPred, bBi, *pcMvPred, cIntegerMv, rcMv);
 +  }
  }
  
  #if MCTS_ENC_CHECK
+@@ -4128,6 +4161,15 @@ Void TEncSearch::xTZSearch( const TComDataCU* const pcCU,
+     }
+   }
+ 
++  // project extension (week 2), hook B: --MVMode=seed adds the external vector as a start point
++  if ( TEncMvIO::get().seed() != NULL )
++  {
++    TComMv cSeedMv = *TEncMvIO::get().seed();
++    pcCU->clipMv( cSeedMv );
++    cSeedMv = TEncMvIO::toIntegerPel( cSeedMv );
++    xTZSearchHelp( pcPatternKey, cStruct, cSeedMv.getHor(), cSeedMv.getVer(), 0, 0 );
++  }
++
+   Int   iSrchRngHorLeft   = pcMvSrchRngLT->getHor();
+   Int   iSrchRngHorRight  = pcMvSrchRngRB->getHor();
+   Int   iSrchRngVerTop    = pcMvSrchRngLT->getVer();
 diff --git a/source/Lib/TLibEncoder/TEncTop.cpp b/source/Lib/TLibEncoder/TEncTop.cpp
 index 1d8917a104d612949c2c28d50ba7889d1465db78..04f2931cc942cb6d7cd3583fe8927d34c7405ccb 100644
 --- a/source/Lib/TLibEncoder/TEncTop.cpp
