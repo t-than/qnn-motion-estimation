@@ -138,8 +138,15 @@ class RaftFlow:
         if ph or pw:
             x = F.pad(x, (0, pw, 0, ph), mode="replicate")
         x = x * 2.0 - 1.0                                                     # RAFT expects [-1, 1]
-        with torch.inference_mode():
-            flow = self.model(x[0:1], x[1:2], num_flow_updates=self.updates)[-1]   # (1, 2, H', W')
+        try:
+            with torch.inference_mode():
+                flow = self.model(x[0:1], x[1:2], num_flow_updates=self.updates)[-1]   # (1, 2, H', W')
+        finally:
+            # torchvision keeps the correlation pyramid as an attribute of the model after the call
+            # (5.6 GB at 1080p). Left there, it is still allocated while the next frame pair builds
+            # its own volume (another 8.4 GB at the peak), and 1080p runs out of memory on 16 GB.
+            self.model.corr_block.corr_pyramid = []
+        del x
         flow = flow[:, :, :sh, :sw]
         if (sh, sw) != (h, w):
             flow = F.interpolate(flow, size=(h, w), mode="bilinear", align_corners=False)
@@ -165,6 +172,12 @@ def process(seq: dict, frames: int, flow_fn, out_dir: Path, matrix: str | None, 
     mat = matrix or default_matrix(w, h)
     mf = MotionField(w, h)
     mae = {"field": 0.0, "zero": 0.0, "flipped": 0.0}
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except ImportError:
+        pass
     t0 = time.time()
     prev = read_frame(path, w, h, 0)
     prev_rgb = yuv_to_rgb(*prev, mat)
@@ -185,6 +198,11 @@ def process(seq: dict, frames: int, flow_fn, out_dir: Path, matrix: str | None, 
     secs = time.time() - t0
     out = out_dir / f"{seq['name']}.mvf"
     write_mvf(out, mf)
+    try:
+        import torch
+        peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else None
+    except ImportError:
+        peak = None
     mags = np.concatenate([np.hypot(*(c[..., :2].reshape(-1, 2).T / 4.0)) for c in mf.entries.values()])
     n = max(frames - 1, 1)
     meta = dict(meta_common, sequence=seq["name"], input=path, width=w, height=h, frames=frames,
@@ -192,11 +210,13 @@ def process(seq: dict, frames: int, flow_fn, out_dir: Path, matrix: str | None, 
                 seconds_per_pair=round(secs / n, 3), mean_abs_mv_px=round(float(mags.mean()), 3),
                 max_abs_mv_px=round(float(mags.max()), 2),
                 mc_mae_orig={k: round(v / n, 3) for k, v in mae.items()},
+                gpu_peak_gib=round(peak, 2) if peak is not None else None,
                 mvf=out.name, mvf_md5=file_md5(out))
     (out_dir / f"{seq['name']}.json").write_text(json.dumps(meta, indent=2) + "\n")
     m = meta["mc_mae_orig"]
     ok = m["field"] < m["zero"] and m["field"] < m["flipped"]
-    print(f"\r  {seq['name']}: {len(mf.entries)} entries, {secs / n:.2f} s per pair, mean |mv| "
+    gpu = f", GPU peak {peak:.1f} GiB" if peak is not None else ""
+    print(f"\r  {seq['name']}: {len(mf.entries)} entries, {secs / n:.2f} s per pair{gpu}, mean |mv| "
           f"{meta['mean_abs_mv_px']:.2f} px; MC error field {m['field']:.2f} / zero {m['zero']:.2f} / "
           f"flipped {m['flipped']:.2f}{'' if ok else '   <-- field not better than zero/flipped!'}")
     return meta
@@ -253,7 +273,11 @@ def selftest() -> int:
         print("  (torch not installed: RaftFlow padding test skipped)")
     else:
         class Stub:          # returns a constant flow (2.0, -1.0) at whatever size it gets
+            def __init__(self):
+                self.corr_block = type("CorrBlock", (), {})()
+
             def __call__(self, a, b, num_flow_updates):
+                self.corr_block.corr_pyramid = [torch.zeros(3)]   # like torchvision: left on the model
                 assert a.shape[-1] % 8 == 0 and a.shape[-2] % 8 == 0, a.shape
                 fl = torch.zeros(1, 2, *a.shape[-2:])
                 fl[:, 0], fl[:, 1] = 2.0, -1.0
@@ -266,6 +290,7 @@ def selftest() -> int:
             out = rf(img, img)
             assert out.shape == (2, hh, ww), out.shape
             assert np.allclose(out[0], want[0], atol=1e-4) and np.allclose(out[1], want[1], atol=1e-4), (s, out.mean((1, 2)))
+            assert rf.model.corr_block.corr_pyramid == [], "correlation pyramid not released"
     # 6. .mvf round trip of a field built here
     with tempfile.TemporaryDirectory() as td:
         mf = MotionField(96, 64)
@@ -334,7 +359,10 @@ def main() -> int:
         try:
             process(s, frames, flow_fn, out_dir, a.matrix, meta_common)
         except torch.cuda.OutOfMemoryError:
-            raise SystemExit(f"\n{s['name']}: out of GPU memory; re-run with --scale 0.5 and a separate --out-dir")
+            free, total = torch.cuda.mem_get_info()
+            raise SystemExit(f"\n{s['name']}: out of GPU memory ({free / 2**30:.1f} of {total / 2**30:.1f} GiB free now; "
+                             "1080p needs about 8 GiB). Check nvidia-smi for other processes using the GPU; "
+                             "if it still fails, re-run with --scale 0.5 and a separate --out-dir")
     return 0
 
 
