@@ -1,0 +1,5 @@
+variant,cfg,group,name,width,height,fps,frames,qp,bytes,kbps,psnr_y,psnr_u,psnr_v,psnr_yuv611,psnr_yuv_hm,enc_wall_s,hm_time_s,decode_match,ok
+dump_d3_jockey9,lowdelay_P,uvg,Jockey,1920,1080,60.0,9,22,191712,10224.64,43.2037,44.6002,44.7162,43.567325000000004,43.6061,106.38,104.497,True,True
+dump_d3_jockey9,lowdelay_P,uvg,Jockey,1920,1080,60.0,9,27,91987,4905.973333333333,41.3893,43.061,43.506,41.862849999999995,41.8941,83.28,82.016,True,True
+dump_d3_jockey9,lowdelay_P,uvg,Jockey,1920,1080,60.0,9,32,50694,2703.68,39.2251,41.7422,42.3874,39.935025,39.9271,75.96,74.529,True,True
+dump_d3_jockey9,lowdelay_P,uvg,Jockey,1920,1080,60.0,9,37,28440,1516.8,36.8127,40.2785,41.1397,37.7868,37.7073,69.5,68.262,True,True
