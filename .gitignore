@@ -12,6 +12,15 @@ week1/sequences*.json
 week1/results/**/*.bin
 week1/results/**/enc.log
 week1/results/**/dec.log
+# week 2: HM-mv worktree (rebuilt from week1/HM + week2/hm-mv.patch), motion fields,
+# and per-job bitstreams, logs, ME dumps and field dumps
+week2/HM-mv/
+week2/mv/
+week2/results/**/*.bin
+week2/results/**/enc.log
+week2/results/**/dec.log
+week2/results/**/*.dump
+week2/results/**/*.mvf
 *.yuv
 *.y4m
 *.7z
