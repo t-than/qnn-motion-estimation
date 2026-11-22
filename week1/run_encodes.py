@@ -10,7 +10,8 @@ For each (sequence, QP) job this script:
 
 Finished jobs are skipped on re-run, so an interrupted batch can simply be
 restarted. A finished job is only reused if it was made with the same encoder,
-input file, size, frame rate, frame count, QP, config and extra options;
+input file, size, frame rate, frame count, QP, config and extra options, and
+(for results recorded since week 2) the same encoder binary (MD5);
 otherwise the run stops before encoding anything (use a new --variant, or
 --force). All results of a run are collected in <results-dir>/<variant>_<cfg>.csv
 (default results-dir: results/ next to this script).
@@ -123,6 +124,7 @@ def run_job(job: dict, args: argparse.Namespace) -> dict:
     result = {"name": seq["name"], "group": seq["group"], "width": seq["width"],
               "height": seq["height"], "fps": seq["fps"], "frames": frames, "qp": qp,
               "variant": args.variant, "cfg": args.cfg, "manifest": Path(args.manifest).name,
+              "encoder_md5": args.encoder_md5,
               "enc_wall_s": round(enc_wall, 2),
               "cmd": shlex.join(cmd), "ok": False}
     m = SUMMARY_RE.search(enc_log)
@@ -194,6 +196,8 @@ def main() -> int:
         if not Path(exe).exists():
             print(f"missing: {exe}  (run ./build_hm.sh first)")
             return 1
+    # The encoder binary itself is part of the reuse check: a rebuilt HM-mv keeps its path.
+    args.encoder_md5 = file_md5(Path(args.encoder))
     seqs = json.loads(Path(args.manifest).read_text())
     if args.groups:
         seqs = [s for s in seqs if s["group"] in args.groups]
@@ -228,6 +232,8 @@ def main() -> int:
             if not old.get("ok") or "cmd" not in old:
                 continue
             a, b = cmd_signature(shlex.split(old["cmd"])), cmd_signature(build_cmd(j, args))
+            if old.get("encoder_md5"):          # recorded since week 2
+                a["encoder_md5"], b["encoder_md5"] = old["encoder_md5"], args.encoder_md5
             diff = [k for k in b if a.get(k) != b[k]]
             if diff:
                 clashes.append((j, diff, a, b))
