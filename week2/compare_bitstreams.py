@@ -8,7 +8,11 @@ replay test (test 1a): both must be identical on every job.
 
   python compare_bitstreams.py ../week1/results/anchor/lowdelay_P results/noop/lowdelay_P
 
-Exit status: 0 if every job present in either folder is in both and identical, 1 otherwise.
+With --common, only jobs present in both folders are compared (e.g. a CIF-only run
+against the full anchor).
+
+Exit status: 0 if every compared job is identical (and, without --common, every job
+present in either folder is in both), 1 otherwise.
 """
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ def main() -> int:
     ap.add_argument("a", type=Path, help="first result folder, e.g. ../week1/results/anchor/lowdelay_P")
     ap.add_argument("b", type=Path, help="second result folder")
     ap.add_argument("-v", "--verbose", action="store_true", help="list identical jobs too")
+    ap.add_argument("--common", action="store_true", help="compare only jobs present in both folders")
     args = ap.parse_args()
 
     A, B = jobs(args.a), jobs(args.b)
@@ -45,6 +50,11 @@ def main() -> int:
         return 1
     same = diff = 0
     only_a, only_b = sorted(set(A) - set(B)), sorted(set(B) - set(A))
+    if args.common:
+        if not set(A) & set(B):
+            print("No job in common between the two folders")
+            return 1
+        only_a, only_b = [], []
     for key in sorted(set(A) & set(B)):
         a, b = A[key], B[key]
         ok = a.stat().st_size == b.stat().st_size and md5(a) == md5(b)

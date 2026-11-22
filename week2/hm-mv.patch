@@ -1,0 +1,521 @@
+diff --git a/source/App/TAppEncoder/TAppEncCfg.cpp b/source/App/TAppEncoder/TAppEncCfg.cpp
+index 51a05af..047bc17 100644
+--- a/source/App/TAppEncoder/TAppEncCfg.cpp
++++ b/source/App/TAppEncoder/TAppEncCfg.cpp
+@@ -877,6 +877,14 @@ Bool TAppEncCfg::parseCfg( Int argc, TChar* argv[] )
+   ("RestrictMESampling",                              m_bRestrictMESampling,                            false, "Restrict ME Sampling for selective inter motion search")
+   ("ClipForBiPredMEEnabled",                          m_bClipForBiPredMeEnabled,                        false, "Enables clipping in the Bi-Pred ME. It is disabled to reduce encoder run-time")
+   ("FastMEAssumingSmootherMVEnabled",                 m_bFastMEAssumingSmootherMVEnabled,                true, "Enables fast ME assuming a smoother MV.")
++  // project extension (week 2): motion-vector dump and injection, see TEncMvIO.h
++  ("MEDumpFile",                                      m_mvIoConfig.meDumpFile,                       string(), "Write one record per integer motion search to this file")
++  ("MEReplayFile",                                    m_mvIoConfig.meReplayFile,                     string(), "Take the integer motion-search results from this --MEDumpFile file")
++  ("MVFieldDumpFile",                                 m_mvIoConfig.mvFieldDumpFile,                  string(), "Write the final coded motion vectors per picture (4x4 grid, .mvf) to this file")
++  ("MVFieldFile",                                     m_mvIoConfig.mvFieldFile,                      string(), "Read an external motion field (.mvf) from this file")
++  ("MVMode",                                          m_mvIoConfig.mvMode,                           string(), "How --MVFieldFile is used: replace or seed")
++  ("MVSeedCentre",                                    m_mvIoConfig.mvSeedCentre,                         false, "Seed mode: centre the search window on the external vector")
++  ("MVRefs",                                          m_mvIoConfig.mvRefs,                      string("first"), "Reference pictures that use the motion field: first (index 0) or all")
+ 
+   ("HadamardME",                                      m_bUseHADME,                                       true, "Hadamard ME for fractional-pel")
+   ("ASR",                                             m_bUseASR,                                        false, "Adaptive motion search range");
+diff --git a/source/App/TAppEncoder/TAppEncCfg.h b/source/App/TAppEncoder/TAppEncCfg.h
+index afdab11..c44b5a0 100644
+--- a/source/App/TAppEncoder/TAppEncCfg.h
++++ b/source/App/TAppEncoder/TAppEncCfg.h
+@@ -536,6 +536,7 @@ protected:
+   UInt      m_aveSEIAmbientLightY;
+ #endif
+   std::string m_summaryOutFilename;                           ///< filename to use for producing summary output file.
++  MvIoConfig  m_mvIoConfig;                                   ///< project extension (week 2): motion-vector dump/injection
+   std::string m_summaryPicFilenameBase;                       ///< Base filename to use for producing summary picture output files. The actual filenames used will have I.txt, P.txt and B.txt appended.
+   UInt        m_summaryVerboseness;                           ///< Specifies the level of the verboseness of the text output.
+ 
+diff --git a/source/App/TAppEncoder/TAppEncTop.cpp b/source/App/TAppEncoder/TAppEncTop.cpp
+index e07c72d..bf43f66 100644
+--- a/source/App/TAppEncoder/TAppEncTop.cpp
++++ b/source/App/TAppEncoder/TAppEncTop.cpp
+@@ -571,6 +571,7 @@ Void TAppEncTop::xInitLibCfg()
+   m_cTEncTop.setHarmonizeGopFirstFieldCoupleEnabled               ( m_bHarmonizeGopFirstFieldCoupleEnabled );
+ 
+   m_cTEncTop.setSummaryOutFilename                                ( m_summaryOutFilename );
++  m_cTEncTop.setMvIoConfig                                        ( m_mvIoConfig );   // project extension (week 2)
+   m_cTEncTop.setSummaryPicFilenameBase                            ( m_summaryPicFilenameBase );
+   m_cTEncTop.setSummaryVerboseness                                ( m_summaryVerboseness );
+ 
+diff --git a/source/Lib/TLibEncoder/TEncCfg.h b/source/Lib/TLibEncoder/TEncCfg.h
+index 07886af..60a7988 100644
+--- a/source/Lib/TLibEncoder/TEncCfg.h
++++ b/source/Lib/TLibEncoder/TEncCfg.h
+@@ -46,6 +46,7 @@
+ #include "TLibCommon/TComSlice.h"
+ #if JVET_T0050_ANNOTATED_REGIONS_SEI
+ #include "TLibCommon/SEI.h"
++#include "TEncMvIO.h"   // project extension (week 2)
+ #endif
+ #include <assert.h>
+ 
+@@ -560,6 +561,7 @@ protected:
+   Bool      m_bHarmonizeGopFirstFieldCoupleEnabled;
+ 
+   std::string m_summaryOutFilename;                           ///< filename to use for producing summary output file.
++  MvIoConfig  m_mvIoConfig;                                   ///< project extension (week 2): motion-vector dump/injection
+   std::string m_summaryPicFilenameBase;                       ///< Base filename to use for producing summary picture output files. The actual filenames used will have I.txt, P.txt and B.txt appended.
+   UInt        m_summaryVerboseness;                           ///< Specifies the level of the verboseness of the text output.
+ 
+@@ -1421,6 +1423,8 @@ public:
+ 
+   Void      setSummaryOutFilename(const std::string &s)              { m_summaryOutFilename = s; }
+   const std::string& getSummaryOutFilename() const                   { return m_summaryOutFilename; }
++  Void      setMvIoConfig(const MvIoConfig &c)                       { m_mvIoConfig = c; }
++  const MvIoConfig& getMvIoConfig() const                            { return m_mvIoConfig; }
+   Void      setSummaryPicFilenameBase(const std::string &s)          { m_summaryPicFilenameBase = s; }
+   const std::string& getSummaryPicFilenameBase() const               { return m_summaryPicFilenameBase; }
+ 
+diff --git a/source/Lib/TLibEncoder/TEncGOP.cpp b/source/Lib/TLibEncoder/TEncGOP.cpp
+index 3687328..0c75806 100644
+--- a/source/Lib/TLibEncoder/TEncGOP.cpp
++++ b/source/Lib/TLibEncoder/TEncGOP.cpp
+@@ -47,6 +47,7 @@
+ #include "TLibCommon/SEI.h"
+ #include "TLibCommon/NAL.h"
+ #include "NALwrite.h"
++#include "TEncMvIO.h"   // project extension (week 2)
+ #include <time.h>
+ #include <math.h>
+ 
+@@ -2045,6 +2046,8 @@ Void TEncGOP::compressGOP( Int iPOCLast, Int iNumPicRcvd, TComList<TComPic*>& rc
+       trailingSeiMessages.push_back(decodedPictureHashSei);
+     }
+ 
++    TEncMvIO::get().dumpPictureField(pcPic);   // project extension (week 2): --MVFieldDumpFile
++
+     m_pcCfg->setEncodedFlag(iGOPid, true);
+ 
+     Double PSNR_Y;
+diff --git a/source/Lib/TLibEncoder/TEncMvIO.cpp b/source/Lib/TLibEncoder/TEncMvIO.cpp
+new file mode 100644
+index 0000000..c7c649c
+--- /dev/null
++++ b/source/Lib/TLibEncoder/TEncMvIO.cpp
+@@ -0,0 +1,285 @@
++/* qnn-motion-estimation project, week 2 (not part of the HM reference software).
++ * See TEncMvIO.h.
++ *
++ * File formats (little-endian):
++ *
++ * --MEDumpFile (".dump"): 16-byte header "QMED", uint32 version = 1, uint32 record size = 32,
++ *   uint32 reserved = 0; then one 32-byte record per call to xMotionEstimation():
++ *     int32 POC, int32 reference POC,
++ *     int16 flags (bit 0: list L1, bit 1: bi-prediction refinement), int16 reference index,
++ *     int16 x, y, width, height       block position and size in luma samples,
++ *     int16 pred_x, pred_y            AMVP predictor the search started from, quarter-pel,
++ *     int16 int_x, int_y              result of the integer search, integer pel,
++ *     int16 mv_x, mv_y                final vector after half/quarter-pel refinement, quarter-pel.
++ *
++ * --MVFieldDumpFile (".mvf"): 24-byte header "QMVF", uint32 version = 1, width, height,
++ *   grid = 4, number of entries; then per entry: int32 POC, int32 reference POC, and
++ *   (height/4) x (width/4) cells in raster order, each int16 mv_x, int16 mv_y (quarter-pel),
++ *   int16 confidence (0 = no vector for this reference, 1000 = coded with it).
++ */
++
++#include "TEncMvIO.h"
++
++#include <algorithm>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++#include "TLibCommon/TComPic.h"
++#include "TLibCommon/TComDataCU.h"
++#include "TLibCommon/TComRom.h"
++
++namespace
++{
++const Int  ME_RECORD_BYTES    = 32;
++const Int  FIELD_GRID         = 4;
++const Int  FIELD_HEADER_BYTES = 24;
++const Int  FIELD_CONF_CODED   = 1000;
++
++[[noreturn]] Void fail(const std::string& msg)
++{
++  fprintf(stderr, "\nHM-mv error: %s\n", msg.c_str());
++  exit(EXIT_FAILURE);
++}
++
++Void putU32(UChar* p, UInt v)  { for (Int i = 0; i < 4; i++) p[i] = UChar((v >> (8 * i)) & 0xff); }
++Void putI32(UChar* p, Int v)   { putU32(p, UInt(v)); }
++Void putI16(UChar* p, Int v)
++{
++  if (v < -32768 || v > 32767)
++  {
++    fail("value out of int16 range in a motion-vector file");
++  }
++  const UInt u = UInt(v) & 0xffff;
++  p[0] = UChar(u & 0xff);
++  p[1] = UChar(u >> 8);
++}
++
++FILE* openForWriting(const std::string& path, const char* option)
++{
++  FILE* f = fopen(path.c_str(), "wb");
++  if (f == NULL)
++  {
++    fail(std::string("cannot open ") + option + " file '" + path + "' for writing");
++  }
++  setvbuf(f, NULL, _IOFBF, 1 << 20);
++  return f;
++}
++
++Void writeOrFail(FILE* f, const Void* data, size_t bytes)
++{
++  if (fwrite(data, 1, bytes, f) != bytes)
++  {
++    fail("write error in a motion-vector file (disk full?)");
++  }
++}
++} // namespace
++
++TEncMvIO& TEncMvIO::get()
++{
++  static TEncMvIO instance;
++  return instance;
++}
++
++TEncMvIO::TEncMvIO()
++: m_meDump(NULL)
++, m_fieldDump(NULL)
++, m_fieldHeaderDone(false)
++, m_fieldWidth(0)
++, m_fieldHeight(0)
++, m_fieldEntries(0)
++, m_meRecords(0)
++{
++}
++
++TEncMvIO::~TEncMvIO()
++{
++  close();
++}
++
++Void TEncMvIO::open(const MvIoConfig& cfg)
++{
++  m_cfg = cfg;
++
++  if (m_cfg.mvRefs != "first" && m_cfg.mvRefs != "all")
++  {
++    fail("--MVRefs must be 'first' or 'all', not '" + m_cfg.mvRefs + "'");
++  }
++  if (!m_cfg.mvMode.empty() && m_cfg.mvMode != "replace" && m_cfg.mvMode != "seed")
++  {
++    fail("--MVMode must be 'replace' or 'seed', not '" + m_cfg.mvMode + "'");
++  }
++  // Day 3 of week 2 implements these. Until then, refuse them rather than ignore them.
++  if (!m_cfg.meReplayFile.empty() || !m_cfg.mvFieldFile.empty() || !m_cfg.mvMode.empty() || m_cfg.mvSeedCentre)
++  {
++    fail("--MEReplayFile, --MVFieldFile, --MVMode and --MVSeedCentre are not implemented yet (week 2, day 3)");
++  }
++
++  if (!m_cfg.meDumpFile.empty())
++  {
++    m_meDump = openForWriting(m_cfg.meDumpFile, "--MEDumpFile");
++    UChar header[16];
++    memcpy(header, "QMED", 4);
++    putU32(header + 4, 1);
++    putU32(header + 8, ME_RECORD_BYTES);
++    putU32(header + 12, 0);
++    writeOrFail(m_meDump, header, sizeof(header));
++  }
++  if (!m_cfg.mvFieldDumpFile.empty())
++  {
++    m_fieldDump = openForWriting(m_cfg.mvFieldDumpFile, "--MVFieldDumpFile");
++    // The header is written with the first picture, when the picture size is known.
++  }
++}
++
++Void TEncMvIO::close()
++{
++  if (m_meDump != NULL)
++  {
++    if (fclose(m_meDump) != 0)
++    {
++      fail("cannot close the --MEDumpFile file");
++    }
++    m_meDump = NULL;
++    printf("\nHM-mv: %llu motion-search records written to %s\n", (unsigned long long)m_meRecords, m_cfg.meDumpFile.c_str());
++  }
++  if (m_fieldDump != NULL)
++  {
++    if (!m_fieldHeaderDone)
++    {
++      writeFieldHeader(0, 0);   // no inter picture was coded
++    }
++    // Patch the number of entries into the header.
++    UChar count[4];
++    putU32(count, m_fieldEntries);
++    if (fseek(m_fieldDump, FIELD_HEADER_BYTES - 4, SEEK_SET) != 0)
++    {
++      fail("cannot seek in the --MVFieldDumpFile file");
++    }
++    writeOrFail(m_fieldDump, count, sizeof(count));
++    if (fclose(m_fieldDump) != 0)
++    {
++      fail("cannot close the --MVFieldDumpFile file");
++    }
++    m_fieldDump = NULL;
++    printf("HM-mv: %u motion-field entries written to %s\n", m_fieldEntries, m_cfg.mvFieldDumpFile.c_str());
++  }
++}
++
++Void TEncMvIO::writeMeRecord(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, Bool bi,
++                             const TComMv& pred, const TComMv& integerMv, const TComMv& finalMv)
++{
++  Int x, y, w, h;
++  cu->getPartPosition(partIdx, x, y, w, h);
++  const TComSlice* slice = cu->getSlice();
++
++  UChar rec[ME_RECORD_BYTES];
++  putI32(rec + 0, slice->getPOC());
++  putI32(rec + 4, slice->getRefPOC(refList, refIdx));
++  putI16(rec + 8, (refList == REF_PIC_LIST_1 ? 1 : 0) | (bi ? 2 : 0));
++  putI16(rec + 10, refIdx);
++  putI16(rec + 12, x);
++  putI16(rec + 14, y);
++  putI16(rec + 16, w);
++  putI16(rec + 18, h);
++  putI16(rec + 20, pred.getHor());
++  putI16(rec + 22, pred.getVer());
++  putI16(rec + 24, integerMv.getHor());
++  putI16(rec + 26, integerMv.getVer());
++  putI16(rec + 28, finalMv.getHor());
++  putI16(rec + 30, finalMv.getVer());
++  writeOrFail(m_meDump, rec, sizeof(rec));
++  m_meRecords++;
++}
++
++Void TEncMvIO::writeFieldHeader(Int width, Int height)
++{
++  UChar header[FIELD_HEADER_BYTES];
++  memcpy(header, "QMVF", 4);
++  putU32(header + 4, 1);
++  putU32(header + 8, UInt(width));
++  putU32(header + 12, UInt(height));
++  putU32(header + 16, FIELD_GRID);
++  putU32(header + 20, 0);           // number of entries, patched in close()
++  writeOrFail(m_fieldDump, header, sizeof(header));
++  m_fieldHeaderDone = true;
++  m_fieldWidth  = width;
++  m_fieldHeight = height;
++}
++
++Void TEncMvIO::dumpPictureField(TComPic* pic)
++{
++  if (m_fieldDump == NULL)
++  {
++    return;
++  }
++  const TComSlice* slice = pic->getSlice(0);
++  if (slice->isIntra() || slice->getNumRefIdx(REF_PIC_LIST_0) == 0)
++  {
++    return;
++  }
++  const TComSPS& sps = *slice->getSPS();
++  const Int width  = Int(sps.getPicWidthInLumaSamples());
++  const Int height = Int(sps.getPicHeightInLumaSamples());
++  if (!m_fieldHeaderDone)
++  {
++    writeFieldHeader(width, height);
++  }
++  else if (width != m_fieldWidth || height != m_fieldHeight)
++  {
++    fail("picture size changed during the sequence; --MVFieldDumpFile needs a fixed size");
++  }
++
++  const Int gridW = (width  + FIELD_GRID - 1) / FIELD_GRID;
++  const Int gridH = (height + FIELD_GRID - 1) / FIELD_GRID;
++  const Int minPartSize = Int(sps.getMaxCUWidth() >> sps.getMaxTotalCUDepth());   // 4 with the CTC configs
++  if (minPartSize % FIELD_GRID != 0)
++  {
++    fail("--MVFieldDumpFile needs a minimum partition size that is a multiple of 4");
++  }
++  const TComPicSym* picSym      = pic->getPicSym();
++  const UInt numParts           = picSym->getNumPartitionsInCtu();
++  const UInt numPartsInCtuWidth = picSym->getNumPartInCtuWidth();
++  const Int  numRefs = (m_cfg.mvRefs == "all") ? slice->getNumRefIdx(REF_PIC_LIST_0) : 1;
++
++  std::vector<UChar> entry(8 + size_t(gridW) * gridH * 6);
++  for (Int refIdx = 0; refIdx < numRefs; refIdx++)
++  {
++    std::fill(entry.begin(), entry.end(), UChar(0));
++    putI32(&entry[0], slice->getPOC());
++    putI32(&entry[4], slice->getRefPOC(REF_PIC_LIST_0, refIdx));
++
++    for (UInt ctuRsAddr = 0; ctuRsAddr < picSym->getNumberOfCtusInFrame(); ctuRsAddr++)
++    {
++      const TComDataCU* ctu = pic->getCtu(ctuRsAddr);
++      const TComCUMvField* mvField = ctu->getCUMvField(REF_PIC_LIST_0);
++      for (UInt absPartIdx = 0; absPartIdx < numParts; absPartIdx++)
++      {
++        const UInt raster = g_auiZscanToRaster[absPartIdx];
++        const Int  px = Int(ctu->getCUPelX()) + Int(raster % numPartsInCtuWidth) * minPartSize;
++        const Int  py = Int(ctu->getCUPelY()) + Int(raster / numPartsInCtuWidth) * minPartSize;
++        if (px >= width || py >= height)
++        {
++          continue;   // part of a CTU outside the picture
++        }
++        if (ctu->isIntra(absPartIdx) || mvField->getRefIdx(absPartIdx) != refIdx)
++        {
++          continue;   // no vector for this reference picture: confidence stays 0
++        }
++        const TComMv& mv = mvField->getMv(absPartIdx);
++        for (Int cy = py / FIELD_GRID; cy < std::min(gridH, (py + minPartSize) / FIELD_GRID); cy++)
++        {
++          for (Int cx = px / FIELD_GRID; cx < std::min(gridW, (px + minPartSize) / FIELD_GRID); cx++)
++          {
++            UChar* cell = &entry[8 + (size_t(cy) * gridW + cx) * 6];
++            putI16(cell + 0, mv.getHor());
++            putI16(cell + 2, mv.getVer());
++            putI16(cell + 4, FIELD_CONF_CODED);
++          }
++        }
++      }
++    }
++    writeOrFail(m_fieldDump, &entry[0], entry.size());
++    m_fieldEntries++;
++  }
++}
+diff --git a/source/Lib/TLibEncoder/TEncMvIO.h b/source/Lib/TLibEncoder/TEncMvIO.h
+new file mode 100644
+index 0000000..715c35d
+--- /dev/null
++++ b/source/Lib/TLibEncoder/TEncMvIO.h
+@@ -0,0 +1,76 @@
++/* qnn-motion-estimation project, week 2 (not part of the HM reference software).
++ *
++ * Motion-vector I/O for HM-mv: record the encoder's motion vectors, and (from day 3)
++ * take motion vectors from outside. See week2/README.md of the project for the file
++ * formats and the tests built on them. With none of the options set, nothing here
++ * runs and the encoder behaves exactly like HM-18.0.
++ */
++
++/** \file     TEncMvIO.h
++    \brief    motion-vector dump / injection (project extension, week 2)
++*/
++
++#ifndef __TENCMVIO__
++#define __TENCMVIO__
++
++#include <cstdio>
++#include <string>
++#include "TLibCommon/CommonDef.h"
++#include "TLibCommon/TComMv.h"
++
++class TComDataCU;
++class TComPic;
++
++//! Command-line settings of the motion-vector I/O (all off by default)
++struct MvIoConfig
++{
++  std::string meDumpFile;       ///< --MEDumpFile: one record per integer motion search
++  std::string meReplayFile;     ///< --MEReplayFile: replay recorded integer searches (day 3)
++  std::string mvFieldDumpFile;  ///< --MVFieldDumpFile: final coded vectors per picture, 4x4 grid
++  std::string mvFieldFile;      ///< --MVFieldFile: external motion field (day 3)
++  std::string mvMode;           ///< --MVMode: "replace" or "seed" (day 3)
++  Bool        mvSeedCentre;     ///< --MVSeedCentre: centre the search window on the external vector (day 3)
++  std::string mvRefs;           ///< --MVRefs: "first" (reference index 0 only) or "all"
++
++  MvIoConfig() : mvSeedCentre(false), mvRefs("first") {}
++};
++
++//! Motion-vector I/O state for one encoder run (a single instance, see get())
++class TEncMvIO
++{
++public:
++  static TEncMvIO& get();
++
++  //! Check the settings and open the files; called once from TEncTop::init()
++  Void open(const MvIoConfig& cfg);
++  //! Finish and close the files; called from TEncTop::destroy()
++  Void close();
++
++  Bool meDumpEnabled() const { return m_meDump != NULL; }
++
++  //! --MEDumpFile: one record for a call to TEncSearch::xMotionEstimation()
++  Void writeMeRecord(const TComDataCU* cu, Int partIdx, RefPicList refList, Int refIdx, Bool bi,
++                     const TComMv& pred, const TComMv& integerMv, const TComMv& finalMv);
++
++  //! --MVFieldDumpFile: final coded vectors of a picture, after it has been coded
++  Void dumpPictureField(TComPic* pic);
++
++private:
++  TEncMvIO();
++  ~TEncMvIO();
++  TEncMvIO(const TEncMvIO&);
++  TEncMvIO& operator=(const TEncMvIO&);
++
++  Void writeFieldHeader(Int width, Int height);
++
++  MvIoConfig m_cfg;
++  FILE*      m_meDump;            ///< --MEDumpFile, or NULL
++  FILE*      m_fieldDump;         ///< --MVFieldDumpFile, or NULL
++  Bool       m_fieldHeaderDone;
++  Int        m_fieldWidth;
++  Int        m_fieldHeight;
++  UInt       m_fieldEntries;
++  UInt64     m_meRecords;
++};
++
++#endif // __TENCMVIO__
+diff --git a/source/Lib/TLibEncoder/TEncSearch.cpp b/source/Lib/TLibEncoder/TEncSearch.cpp
+index 25b1bcc..440973c 100644
+--- a/source/Lib/TLibEncoder/TEncSearch.cpp
++++ b/source/Lib/TLibEncoder/TEncSearch.cpp
+@@ -41,6 +41,7 @@
+ #include "TEncSearch.h"
+ #include "TLibCommon/TComTU.h"
+ #include "TLibCommon/Debug.h"
++#include "TEncMvIO.h"   // project extension (week 2)
+ #include <math.h>
+ #include <limits>
+ 
+@@ -3851,6 +3852,7 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+   m_pcRdCost->setCostScale ( 1 );
+ 
+   const Bool bIsLosslessCoded = pcCU->getCUTransquantBypass(uiPartAddr) != 0;
++  const TComMv cIntegerMv = rcMv;   // project extension (week 2): integer search result (hook A)
+   xPatternSearchFracDIF( bIsLosslessCoded, &cPattern, piRefY, iRefStride, &rcMv, cMvHalf, cMvQter, ruiCost );
+ 
+   m_pcRdCost->setCostScale( 0 );
+@@ -3862,6 +3864,12 @@ Void TEncSearch::xMotionEstimation( TComDataCU* pcCU, TComYuv* pcYuvOrg, Int iPa
+ 
+   ruiBits      += uiMvBits;
+   ruiCost       = (Distortion)( floor( fWeight * ( (Double)ruiCost - (Double)m_pcRdCost->getCost( uiMvBits ) ) ) + (Double)m_pcRdCost->getCost( ruiBits ) );
++
++  // project extension (week 2): --MEDumpFile
++  if (TEncMvIO::get().meDumpEnabled())
++  {
++    TEncMvIO::get().writeMeRecord(pcCU, iPartIdx, eRefPicList, iRefIdxPred, bBi, *pcMvPred, cIntegerMv, rcMv);
++  }
+ }
+ 
+ #if MCTS_ENC_CHECK
+diff --git a/source/Lib/TLibEncoder/TEncTop.cpp b/source/Lib/TLibEncoder/TEncTop.cpp
+index 1d8917a..04f2931 100644
+--- a/source/Lib/TLibEncoder/TEncTop.cpp
++++ b/source/Lib/TLibEncoder/TEncTop.cpp
+@@ -152,6 +152,8 @@ Void TEncTop::create ()
+ 
+ Void TEncTop::destroy ()
+ {
++  TEncMvIO::get().close();   // project extension (week 2)
++
+   // destroy processing unit classes
+   m_cGOPEncoder.        destroy();
+   m_cSliceEncoder.      destroy();
+@@ -188,6 +190,8 @@ Void TEncTop::destroy ()
+ 
+ Void TEncTop::init(Bool isFieldCoding)
+ {
++  TEncMvIO::get().open(getMvIoConfig());   // project extension (week 2)
++
+   TComSPS &sps0=*(m_spsMap.allocatePS(0)); // NOTE: implementations that use more than 1 SPS need to be aware of activation issues.
+   TComPPS &pps0=*(m_ppsMap.allocatePS(0));
+   // initialize SPS
