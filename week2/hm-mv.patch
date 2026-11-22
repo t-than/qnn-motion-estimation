@@ -1,5 +1,5 @@
 diff --git a/source/App/TAppEncoder/TAppEncCfg.cpp b/source/App/TAppEncoder/TAppEncCfg.cpp
-index 51a05af..047bc17 100644
+index 51a05afaa53ee390cec5492f9dfdaaca64122fb8..047bc178111a8cabf51d0d717e895624b02c7597 100644
 --- a/source/App/TAppEncoder/TAppEncCfg.cpp
 +++ b/source/App/TAppEncoder/TAppEncCfg.cpp
 @@ -877,6 +877,14 @@ Bool TAppEncCfg::parseCfg( Int argc, TChar* argv[] )
@@ -18,7 +18,7 @@ index 51a05af..047bc17 100644
    ("HadamardME",                                      m_bUseHADME,                                       true, "Hadamard ME for fractional-pel")
    ("ASR",                                             m_bUseASR,                                        false, "Adaptive motion search range");
 diff --git a/source/App/TAppEncoder/TAppEncCfg.h b/source/App/TAppEncoder/TAppEncCfg.h
-index afdab11..c44b5a0 100644
+index afdab1161eb988a771bb11780eefb6addf320b35..c44b5a0ee018d1f6c56d77e9b014b9d263ea7f06 100644
 --- a/source/App/TAppEncoder/TAppEncCfg.h
 +++ b/source/App/TAppEncoder/TAppEncCfg.h
 @@ -536,6 +536,7 @@ protected:
@@ -30,7 +30,7 @@ index afdab11..c44b5a0 100644
    UInt        m_summaryVerboseness;                           ///< Specifies the level of the verboseness of the text output.
  
 diff --git a/source/App/TAppEncoder/TAppEncTop.cpp b/source/App/TAppEncoder/TAppEncTop.cpp
-index e07c72d..bf43f66 100644
+index e07c72d8b658d838d101a000b2481f21c15f7802..bf43f667ead79e3a9e67c4162477470fe4a1f529 100644
 --- a/source/App/TAppEncoder/TAppEncTop.cpp
 +++ b/source/App/TAppEncoder/TAppEncTop.cpp
 @@ -571,6 +571,7 @@ Void TAppEncTop::xInitLibCfg()
@@ -42,17 +42,17 @@ index e07c72d..bf43f66 100644
    m_cTEncTop.setSummaryVerboseness                                ( m_summaryVerboseness );
  
 diff --git a/source/Lib/TLibEncoder/TEncCfg.h b/source/Lib/TLibEncoder/TEncCfg.h
-index 07886af..60a7988 100644
+index 07886af964c2764f77ba8808429e25dea716a24a..c9fd1922d43ca5ed5e11dad454aee551ffb1bb7d 100644
 --- a/source/Lib/TLibEncoder/TEncCfg.h
 +++ b/source/Lib/TLibEncoder/TEncCfg.h
-@@ -46,6 +46,7 @@
- #include "TLibCommon/TComSlice.h"
+@@ -47,6 +47,7 @@
  #if JVET_T0050_ANNOTATED_REGIONS_SEI
  #include "TLibCommon/SEI.h"
-+#include "TEncMvIO.h"   // project extension (week 2)
  #endif
++#include "TEncMvIO.h"   // project extension (week 2)
  #include <assert.h>
  
+ struct GOPEntry
 @@ -560,6 +561,7 @@ protected:
    Bool      m_bHarmonizeGopFirstFieldCoupleEnabled;
  
@@ -71,7 +71,7 @@ index 07886af..60a7988 100644
    const std::string& getSummaryPicFilenameBase() const               { return m_summaryPicFilenameBase; }
  
 diff --git a/source/Lib/TLibEncoder/TEncGOP.cpp b/source/Lib/TLibEncoder/TEncGOP.cpp
-index 3687328..0c75806 100644
+index 368732875dd5e25dbb9fb5fbf03c834d7c0c211b..0c75806854a21c944bf28784c13877131aa5bc44 100644
 --- a/source/Lib/TLibEncoder/TEncGOP.cpp
 +++ b/source/Lib/TLibEncoder/TEncGOP.cpp
 @@ -47,6 +47,7 @@
@@ -93,7 +93,7 @@ index 3687328..0c75806 100644
      Double PSNR_Y;
 diff --git a/source/Lib/TLibEncoder/TEncMvIO.cpp b/source/Lib/TLibEncoder/TEncMvIO.cpp
 new file mode 100644
-index 0000000..c7c649c
+index 0000000000000000000000000000000000000000..c7c649cbd639950e95f5cc9c9b32611fc14a4792
 --- /dev/null
 +++ b/source/Lib/TLibEncoder/TEncMvIO.cpp
 @@ -0,0 +1,285 @@
@@ -384,7 +384,7 @@ index 0000000..c7c649c
 +}
 diff --git a/source/Lib/TLibEncoder/TEncMvIO.h b/source/Lib/TLibEncoder/TEncMvIO.h
 new file mode 100644
-index 0000000..715c35d
+index 0000000000000000000000000000000000000000..715c35d084659749b4230165ca883a6d59b8e300
 --- /dev/null
 +++ b/source/Lib/TLibEncoder/TEncMvIO.h
 @@ -0,0 +1,76 @@
@@ -465,7 +465,7 @@ index 0000000..715c35d
 +
 +#endif // __TENCMVIO__
 diff --git a/source/Lib/TLibEncoder/TEncSearch.cpp b/source/Lib/TLibEncoder/TEncSearch.cpp
-index 25b1bcc..440973c 100644
+index 25b1bccf54ca5bae8dbb282a39a402c4cb673a0a..440973c2f56c142445a32d96115b5ec7175d9cce 100644
 --- a/source/Lib/TLibEncoder/TEncSearch.cpp
 +++ b/source/Lib/TLibEncoder/TEncSearch.cpp
 @@ -41,6 +41,7 @@
@@ -498,7 +498,7 @@ index 25b1bcc..440973c 100644
  
  #if MCTS_ENC_CHECK
 diff --git a/source/Lib/TLibEncoder/TEncTop.cpp b/source/Lib/TLibEncoder/TEncTop.cpp
-index 1d8917a..04f2931 100644
+index 1d8917a104d612949c2c28d50ba7889d1465db78..04f2931cc942cb6d7cd3583fe8927d34c7405ccb 100644
 --- a/source/Lib/TLibEncoder/TEncTop.cpp
 +++ b/source/Lib/TLibEncoder/TEncTop.cpp
 @@ -152,6 +152,8 @@ Void TEncTop::create ()

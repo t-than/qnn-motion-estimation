@@ -27,6 +27,8 @@ HM_REF="HM-18.0"
 JOBS="$(nproc)"
 MODE="${1:-build}"
 
+# --full-index: full object hashes in the patch, so the comparison below doesn't depend on how
+# many characters git abbreviates hashes to (which differs between repositories).
 # Never part of the patch: HM's CMakeLists.txt (edited by the -Werror fallback below, a
 # build workaround, not a motion-vector change) and this script's build-info file.
 # Build output (build/, bin/, lib/) is already ignored by HM's own .gitignore.
@@ -42,7 +44,7 @@ esac
 if [[ "${MODE}" == "--save-patch" ]]; then
     [[ -d "${HM_MV}" ]] || { echo "ERROR: ${HM_MV} does not exist yet"; exit 1; }
     git -C "${HM_MV}" add --intent-to-add --all -- . "${PATCH_EXCLUDE[@]}"   # include new files
-    git -C "${HM_MV}" diff --binary "${HM_REF}" -- . "${PATCH_EXCLUDE[@]}" > "${PATCH}"
+    git -C "${HM_MV}" diff --binary --full-index "${HM_REF}" -- . "${PATCH_EXCLUDE[@]}" > "${PATCH}"
     echo "Wrote ${PATCH}: $(grep -c '^diff --git' "${PATCH}" || true) file(s), $(wc -l < "${PATCH}") lines"
     exit 0
 fi
@@ -102,7 +104,7 @@ DEC="${HM_MV}/bin/TAppDecoderStatic"
 
 # Are there changes in HM-mv that hm-mv.patch does not contain?
 git add --intent-to-add --all -- . "${PATCH_EXCLUDE[@]}"
-CURRENT="$(git diff --binary "${HM_REF}" -- . "${PATCH_EXCLUDE[@]}")"
+CURRENT="$(git diff --binary --full-index "${HM_REF}" -- . "${PATCH_EXCLUDE[@]}")"
 SAVED="$( [[ -f "${PATCH}" ]] && cat "${PATCH}" || true )"
 if [[ -z "${CURRENT}" && -z "${SAVED}" ]]; then
     PATCH_STATE="plain ${HM_REF} (no changes, no patch)"
