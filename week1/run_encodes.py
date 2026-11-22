@@ -9,7 +9,11 @@ For each (sequence, QP) job this script:
   4. parses rate and PSNR from HM's SUMMARY and stores result.json.
 
 Finished jobs are skipped on re-run, so an interrupted batch can simply be
-restarted. All results of a run are collected in results/<variant>_<cfg>.csv.
+restarted. A finished job is only reused if it was made with the same encoder,
+input file, size, frame rate, frame count, QP, config and extra options;
+otherwise the run stops before encoding anything (use a new --variant, or
+--force). All results of a run are collected in <results-dir>/<variant>_<cfg>.csv
+(default results-dir: results/ next to this script).
 
 Examples
 --------
@@ -66,6 +70,34 @@ def file_md5(path: Path) -> str:
     return h.hexdigest()
 
 
+def build_cmd(job: dict, args: argparse.Namespace) -> list:
+    """The encoder command line for one job."""
+    seq, qp, jdir = job["seq"], job["qp"], Path(job["dir"])
+    extra = args.extra.format(name=seq["name"], qp=qp, w=seq["width"], h=seq["height"],
+                              frames=job["frames"], mvdir=args.mvdir, dir=str(jdir))
+    return [str(args.encoder), "-c", str(args.cfg_path),
+            "-i", seq["path"], "-wdt", str(seq["width"]), "-hgt", str(seq["height"]),
+            "-fr", str(round(seq["fps"])), "-f", str(job["frames"]), "-q", str(qp),
+            f"--InputBitDepth={seq['bit_depth']}", "--SEIDecodedPictureHash=1",
+            "-b", str(jdir / "str.bin"), "-o", str(jdir / "rec.yuv")] + shlex.split(extra)
+
+
+def cmd_signature(cmd: list) -> dict:
+    """What decides an encode's result, taken from its command line.
+
+    Output paths (-b, -o) are left out, and the encoder and config are reduced to
+    their last path components, so that the same job compares equal even if the
+    project folder was moved. Everything after the reconstruction path is the
+    --extra part.
+    """
+    tail = lambda p, n: "/".join(Path(p).parts[-n:])
+    val = lambda flag: cmd[cmd.index(flag) + 1]
+    q_pos, b_pos, o_pos = cmd.index("-q"), cmd.index("-b"), cmd.index("-o")
+    return {"encoder": tail(cmd[0], 3), "cfg": tail(val("-c"), 1), "input": val("-i"),
+            "size": f"{val('-wdt')}x{val('-hgt')}", "fps": val("-fr"), "frames": val("-f"),
+            "qp": val("-q"), "fixed": cmd[q_pos + 2:b_pos], "extra": cmd[o_pos + 2:]}
+
+
 def run_job(job: dict, args: argparse.Namespace) -> dict:
     seq, qp, jdir = job["seq"], job["qp"], Path(job["dir"])
     jdir.mkdir(parents=True, exist_ok=True)
@@ -78,13 +110,7 @@ def run_job(job: dict, args: argparse.Namespace) -> dict:
 
     bin_, rec, dec = jdir / "str.bin", jdir / "rec.yuv", jdir / "dec.yuv"
     frames = job["frames"]
-    extra = args.extra.format(name=seq["name"], qp=qp, w=seq["width"], h=seq["height"],
-                              frames=frames, mvdir=args.mvdir, dir=str(jdir))
-    cmd = [str(args.encoder), "-c", str(args.cfg_path),
-           "-i", seq["path"], "-wdt", str(seq["width"]), "-hgt", str(seq["height"]),
-           "-fr", str(round(seq["fps"])), "-f", str(frames), "-q", str(qp),
-           f"--InputBitDepth={seq['bit_depth']}", "--SEIDecodedPictureHash=1",
-           "-b", str(bin_), "-o", str(rec)] + shlex.split(extra)
+    cmd = build_cmd(job, args)
 
     t0 = time.time()
     with (jdir / "enc.log").open("w") as log:
@@ -96,7 +122,8 @@ def run_job(job: dict, args: argparse.Namespace) -> dict:
 
     result = {"name": seq["name"], "group": seq["group"], "width": seq["width"],
               "height": seq["height"], "fps": seq["fps"], "frames": frames, "qp": qp,
-              "variant": args.variant, "cfg": args.cfg, "enc_wall_s": round(enc_wall, 2),
+              "variant": args.variant, "cfg": args.cfg, "manifest": Path(args.manifest).name,
+              "enc_wall_s": round(enc_wall, 2),
               "cmd": shlex.join(cmd), "ok": False}
     m = SUMMARY_RE.search(enc_log)
     if p.returncode != 0 or not m:
@@ -144,6 +171,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", default=str(ROOT / "sequences.json"))
     ap.add_argument("--variant", default="anchor", help="label for this set of results")
+    ap.add_argument("--results-dir", default=str(ROOT / "results"),
+                    help="where <variant>/ and <variant>_<cfg>.csv go (default: results/ next to this script)")
     ap.add_argument("--cfg", default="lowdelay_P", help=f"one of {list(CFGS)} or a path to a .cfg")
     ap.add_argument("--qps", type=int, nargs="+", default=[22, 27, 32, 37])
     ap.add_argument("--jobs", type=int, default=6, help="parallel encodes (default 6 = physical cores)")
@@ -174,7 +203,8 @@ def main() -> int:
         print("no sequences selected")
         return 1
     cfg_label = Path(args.cfg).stem if args.cfg.endswith(".cfg") else args.cfg
-    outdir = ROOT / "results" / args.variant / cfg_label
+    results_dir = Path(args.results_dir).resolve()
+    outdir = results_dir / args.variant / cfg_label
 
     if args.estimate:
         return estimate(seqs, args, outdir)
@@ -185,6 +215,30 @@ def main() -> int:
         for qp in args.qps:
             jobs.append({"seq": s, "qp": qp, "frames": n,
                          "dir": str(outdir / f"{s['name']}_{s['width']}x{s['height']}" / f"QP{qp}")})
+    # Reuse check: a finished job is skipped on re-run, so make sure it was made with
+    # the same command. Otherwise e.g. the same --variant with another manifest (60 fps
+    # instead of 120 fps) would silently return the old results.
+    if not args.force:
+        clashes = []
+        for j in jobs:
+            res_file = Path(j["dir"]) / "result.json"
+            if not res_file.exists():
+                continue
+            old = json.loads(res_file.read_text())
+            if not old.get("ok") or "cmd" not in old:
+                continue
+            a, b = cmd_signature(shlex.split(old["cmd"])), cmd_signature(build_cmd(j, args))
+            diff = [k for k in b if a.get(k) != b[k]]
+            if diff:
+                clashes.append((j, diff, a, b))
+        if clashes:
+            print(f"STOP: {len(clashes)} finished job(s) in {outdir} were made with a different command.")
+            for j, diff, a, b in clashes[:5]:
+                print(f"  {j['seq']['name']} QP{j['qp']}: " +
+                      "; ".join(f"{k}: {a.get(k)} -> {b[k]}" for k in diff))
+            print("Use a new --variant (or --results-dir), or --force to re-encode them.")
+            return 1
+
     # largest jobs first so the pool does not end on one long straggler
     jobs.sort(key=lambda j: -j["seq"]["width"] * j["seq"]["height"] * j["frames"] * (60 - j["qp"]))
 
@@ -203,7 +257,7 @@ def main() -> int:
             print(f"[{i:3d}/{len(jobs)}] {tag} {r['name']:14s} QP{r['qp']}  {info}", flush=True)
 
     results.sort(key=lambda r: (r["group"], r["name"], r["qp"]))
-    csv_path = ROOT / "results" / f"{args.variant}_{cfg_label}.csv"
+    csv_path = results_dir / f"{args.variant}_{cfg_label}.csv"
     cols = ["variant", "cfg", "group", "name", "width", "height", "fps", "frames", "qp", "bytes",
             "kbps", "psnr_y", "psnr_u", "psnr_v", "psnr_yuv611", "psnr_yuv_hm",
             "enc_wall_s", "hm_time_s", "decode_match", "ok"]
