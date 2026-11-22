@@ -2,10 +2,12 @@
 .venv/
 __pycache__/
 *.pyc
-week1/HM/            # HM is its own git repo; its commit is recorded in hm_build_info.txt
-week1/data/          # raw and prepared video, datasets
+# HM is its own git repo; its commit is recorded in week1/HM/hm_build_info.txt
+week1/HM/
+# raw and prepared video, datasets
+week1/data/
+# bitstreams, reconstructions and HM logs (result CSVs and result.json ARE tracked)
 week1/results/**/*.bin
-week1/results/**/*.yuv
 week1/results/**/enc.log
 week1/results/**/dec.log
 *.yuv
